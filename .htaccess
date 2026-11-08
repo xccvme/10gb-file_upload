@@ -1,0 +1,5 @@
+# Wajib: Apache 2.4.54+ (termasuk XAMPP) default membatasi request 1 GB
+LimitRequestBody 0
+Options -Indexes
+# Penanda .htaccess aktif (dicek di halaman admin)
+SetEnv HTACCESS_OK 1

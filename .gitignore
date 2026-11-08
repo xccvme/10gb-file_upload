@@ -1,9 +1,6 @@
 # file hasil upload
-public/files_upload/*
-!public/files_upload/index.php
-!public/files_upload/.htaccess
-# runtime
-tmp/
+files_upload/*
+!files_upload/index.php
+!files_upload/.htaccess
+# dibuat otomatis
 data/tokens.json
-data/login_attempts.json
-*.log

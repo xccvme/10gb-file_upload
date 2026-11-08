@@ -1,113 +1,76 @@
 <?php
-require __DIR__ . '/../../lib/common.php';
-start_session();
+// Admin: login (data/admin.json), daftar file, download, hapus, link bertoken.
+require __DIR__ . '/config.php';
+session_on();
 
-$ip = $_SERVER['REMOTE_ADDR'] ?? '0';
 $error = '';
-$flash = $_SESSION['flash'] ?? '';
-unset($_SESSION['flash']);
-
+$flash = $_SESSION['flash'] ?? ''; unset($_SESSION['flash']);
 $action = $_POST['action'] ?? '';
+$post = $_SERVER['REQUEST_METHOD'] === 'POST';
+function back($msg = '') { if ($msg) $_SESSION['flash'] = $msg; header('Location: admin.php'); exit; }
+function json_out($a) { header('Content-Type: application/json; charset=UTF-8'); exit(json_encode($a, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); }
 
-/* ---------- LOGIN ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'login') {
-    if (!csrf_ok($_POST['csrf'] ?? null)) {
-        $error = 'Sesi kedaluwarsa, coba lagi.';
-    } elseif ($wait = login_locked($ip)) {
-        $error = "Terlalu banyak percobaan. Coba lagi dalam $wait detik.";
-    } else {
-        $admin = load_admin();
-        $u = (string)($_POST['username'] ?? '');
-        $p = (string)($_POST['password'] ?? '');
-        $stored = (string)($admin['password'] ?? '');
-        // Mendukung password plain di JSON, atau hash bcrypt ($2y$...) jika nanti mau di-hash.
-        $passOk = $admin && (str_starts_with($stored, '$2y$') ? password_verify($p, $stored) : hash_equals($stored, $p));
-        if ($admin && hash_equals((string)$admin['username'], $u) && $passOk) {
-            session_regenerate_id(true);
-            $_SESSION['admin'] = $u;
-            $_SESSION['csrf'] = bin2hex(random_bytes(32));
-            login_reset($ip);
-            header('Location: /admin/');
-            exit;
+// Login
+if ($post && $action === 'login') {
+    if (csrf_ok() && check_login((string)($_POST['username'] ?? ''), (string)($_POST['password'] ?? ''))) {
+        session_regenerate_id(true);
+        $_SESSION['admin'] = $_POST['username'];
+        back();
+    }
+    sleep(1); // perlambat tebak password
+    $error = 'Username atau password salah.';
+}
+
+// Aksi admin (wajib login + csrf)
+if ($post && $action !== 'login') {
+    if (!logged_in() || !csrf_ok()) $action === 'token' ? json_out(['ok' => false, 'error' => 'Sesi habis, refresh & login ulang.']) : back('Sesi habis.');
+
+    if ($action === 'logout') { session_destroy(); header('Location: admin.php'); exit; }
+
+    if ($action === 'delete') {
+        $f = (string)($_POST['f'] ?? '');
+        $p = file_path($f);
+        if ($p && unlink($p)) {
+            tokens(function (&$t) use ($f) { $t = array_filter($t, fn($x) => $x['file'] !== $f); });
+            back("File dihapus: $f");
         }
-        login_failed($ip);
-        usleep(400000);
-        $error = 'Username atau password salah.';
+        back('Gagal menghapus file.');
+    }
+
+    if ($action === 'revoke') {
+        $tok = (string)($_POST['t'] ?? '');
+        tokens(function (&$t) use ($tok) { unset($t[$tok]); });
+        back('Link dicabut.');
+    }
+
+    if ($action === 'token') {
+        $f = (string)($_POST['f'] ?? '');
+        $ttl = (int)($_POST['ttl'] ?? -1);                      // detik, 0 = permanen
+        if (!file_path($f)) json_out(['ok' => false, 'error' => 'File tidak ditemukan.']);
+        if ($ttl < 0 || $ttl > 365 * 86400) json_out(['ok' => false, 'error' => 'Masa aktif tidak valid (maks 365 hari).']);
+        $tok = bin2hex(random_bytes(16));
+        $exp = $ttl ? time() + $ttl : 0;
+        tokens(function (&$t) use ($tok, $f, $exp) { $t[$tok] = ['file' => $f, 'created' => time(), 'expires' => $exp, 'hits' => 0]; });
+        $url = token_url($f, $tok);
+        json_out(['ok' => true, 'url' => $url, 'expires_text' => $exp ? date('d M Y H:i T', $exp) : 'Permanen'] + download_cmds($f, $url));
     }
 }
 
-/* ---------- LOGOUT ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'logout' && csrf_ok($_POST['csrf'] ?? null)) {
-    $_SESSION = [];
-    session_destroy();
-    header('Location: /admin/');
-    exit;
-}
-
-/* ---------- HAPUS FILE ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'delete' && is_logged_in()) {
-    if (csrf_ok($_POST['csrf'] ?? null) && ($path = storage_path((string)($_POST['f'] ?? '')))) {
-        $ok = @unlink($path);
-        if ($ok) tokens_revoke_file(basename($path));
-        $_SESSION['flash'] = $ok ? 'File dihapus: ' . basename($path) : 'Gagal menghapus file.';
-    } else {
-        $_SESSION['flash'] = 'Permintaan tidak valid.';
-    }
-    header('Location: /admin/');
-    exit;
-}
-
-/* ---------- BUAT LINK BERTOKEN (AJAX/JSON) ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'token') {
-    header('Content-Type: application/json; charset=UTF-8');
-    if (!is_logged_in()) { http_response_code(401); exit(json_encode(['ok' => false, 'error' => 'Sesi habis, silakan login ulang.'])); }
-    if (!csrf_ok($_POST['csrf'] ?? null)) { http_response_code(400); exit(json_encode(['ok' => false, 'error' => 'CSRF tidak valid, refresh halaman.'])); }
-    $f = (string)($_POST['f'] ?? '');
-    if (storage_path($f) === null) { http_response_code(404); exit(json_encode(['ok' => false, 'error' => 'File tidak ditemukan.'])); }
-    $ttl = (int)($_POST['ttl'] ?? -1);
-    $maxTtl = 365 * 86400;
-    if ($ttl < 0 || $ttl > $maxTtl) { http_response_code(400); exit(json_encode(['ok' => false, 'error' => 'Masa aktif tidak valid (maks 365 hari).'])); }
-    $t = token_create($f, $ttl);
-    $url = token_url($f, $t['token']);
-    $out = basename($f);
-    exit(json_encode([
-        'ok' => true,
-        'url' => $url,
-    ] + download_cmds($out, $url) + [
-        'expires' => $t['expires'],
-        'expires_text' => $t['expires'] ? date('d M Y H:i T', $t['expires']) : 'Permanen',
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-}
-
-/* ---------- CABUT TOKEN ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'revoke' && is_logged_in()) {
-    $_SESSION['flash'] = (csrf_ok($_POST['csrf'] ?? null) && token_revoke((string)($_POST['t'] ?? '')))
-        ? 'Link dicabut.' : 'Link tidak ditemukan.';
-    header('Location: /admin/#links');
-    exit;
-}
-
-$logged = is_logged_in();
-$files = [];
-$totalSize = 0;
-if ($logged && is_dir(STORAGE_DIR)) {
-    foreach (scandir(STORAGE_DIR) as $f) {
-        if ($f === '.' || $f === '..' || in_array(strtolower($f), RESERVED_NAMES, true)) continue; // file proteksi internal
-        $p = STORAGE_DIR . '/' . $f;
-        if (!is_file($p)) continue;
-        $sz = filesize($p);
-        if ($sz === 0 && filemtime($p) > time() - 5) continue; // slot yg sedang ditulis
-        $files[] = ['name' => $f, 'size' => $sz, 'mtime' => filemtime($p)];
-        $totalSize += $sz;
+$logged = logged_in();
+$files = []; $totalSize = 0; $activeTokens = [];
+if ($logged) {
+    foreach (scandir(UPLOAD_DIR) as $f) {
+        $p = UPLOAD_DIR . '/' . $f;
+        if (!is_file($p) || in_array(strtolower($f), RESERVED, true)) continue;
+        if (filesize($p) === 0 && filemtime($p) > time() - 5) continue; // sedang diupload
+        $files[] = ['name' => $f, 'size' => filesize($p), 'mtime' => filemtime($p)];
+        $totalSize += filesize($p);
     }
     usort($files, fn($a, $b) => $b['mtime'] <=> $a['mtime']);
-}
-$disk = @disk_free_space(STORAGE_DIR);
-$activeTokens = [];
-if ($logged) {
-    foreach (tokens_all() as $k => $v) $activeTokens[] = ['token' => $k] + $v;
+    foreach (tokens() as $k => $v) $activeTokens[] = ['token' => $k] + $v;
     usort($activeTokens, fn($a, $b) => $b['created'] <=> $a['created']);
 }
+$disk = @disk_free_space(UPLOAD_DIR);
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -135,7 +98,7 @@ if ($logged) {
             <div class="p-3 text-sm bg-red-50 text-red-700 border border-red-200 rounded-lg"><?= h($error) ?></div>
         <?php endif; ?>
         <input type="hidden" name="action" value="login">
-        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+        <input type="hidden" name="csrf" value="<?= h(csrf()) ?>">
         <div>
             <label class="block mb-1 text-sm font-medium text-slate-700">Username</label>
             <input name="username" required autofocus autocomplete="username" class="w-full border border-slate-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400">
@@ -145,7 +108,7 @@ if ($logged) {
             <input name="password" type="password" required autocomplete="current-password" class="w-full border border-slate-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400">
         </div>
         <button class="w-full text-white bg-indigo-600 hover:bg-indigo-700 font-bold rounded-xl text-sm px-5 py-3 shadow-lg shadow-indigo-500/30 transition">Masuk</button>
-        <p class="text-center text-xs"><a href="/" class="text-slate-500 hover:text-indigo-600">&larr; Kembali ke halaman upload</a></p>
+        <p class="text-center text-xs"><a href="./" class="text-slate-500 hover:text-indigo-600">&larr; Kembali ke halaman upload</a></p>
     </form>
 </div>
 
@@ -155,19 +118,23 @@ if ($logged) {
         <div>
             <h1 class="text-2xl font-bold text-slate-800">Daftar File</h1>
             <p class="text-sm text-slate-500">
-                <?= count($files) ?> file &middot; total <?= h(format_bytes($totalSize)) ?>
-                <?php if ($disk !== false): ?> &middot; sisa disk <?= h(format_bytes($disk)) ?><?php endif; ?>
+                <?= count($files) ?> file &middot; total <?= h(size_text($totalSize)) ?>
+                <?php if ($disk !== false): ?> &middot; sisa disk <?= h(size_text($disk)) ?><?php endif; ?>
             </p>
         </div>
         <div class="flex gap-2">
-            <a href="/" class="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">+ Upload</a>
+            <a href="./" class="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">+ Upload</a>
             <form method="post">
                 <input type="hidden" name="action" value="logout">
-                <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                <input type="hidden" name="csrf" value="<?= h(csrf()) ?>">
                 <button class="px-4 py-2 text-sm font-semibold rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-50">Logout (<?= h($_SESSION['admin']) ?>)</button>
             </form>
         </div>
     </div>
+
+    <?php foreach (setup_warnings() as $w): ?>
+        <div class="mb-3 p-3 text-sm bg-amber-50 text-amber-800 border border-amber-200 rounded-lg">⚠ <?= h($w) ?></div>
+    <?php endforeach; ?>
 
     <?php if ($flash): ?>
         <div class="mb-4 p-3 text-sm bg-green-50 text-green-700 border border-green-200 rounded-lg"><?= h($flash) ?></div>
@@ -186,17 +153,17 @@ if ($logged) {
                 <tr><th class="text-left px-4 py-3">Nama File</th><th class="text-right px-4 py-3">Ukuran</th><th class="text-left px-4 py-3">Diupload</th><th class="text-right px-4 py-3">Aksi</th></tr>
             </thead>
             <tbody id="rows">
-            <?php foreach ($files as $f): $link = '/download.php?f=' . rawurlencode($f['name']); ?>
-                <tr class="border-t border-slate-100 hover:bg-slate-50" data-name="<?= h(mb_strtolower($f['name'])) ?>">
+            <?php foreach ($files as $f): $link = 'download.php?f=' . rawurlencode($f['name']); ?>
+                <tr class="border-t border-slate-100 hover:bg-slate-50" data-name="<?= h(strtolower($f['name'])) ?>">
                     <td class="px-4 py-3 font-medium text-slate-800 break-all"><?= h($f['name']) ?></td>
-                    <td class="px-4 py-3 text-right font-mono text-xs text-slate-600 whitespace-nowrap"><?= h(format_bytes($f['size'])) ?></td>
+                    <td class="px-4 py-3 text-right font-mono text-xs text-slate-600 whitespace-nowrap"><?= h(size_text($f['size'])) ?></td>
                     <td class="px-4 py-3 text-slate-500 whitespace-nowrap"><?= date('d M Y H:i', $f['mtime']) ?></td>
                     <td class="px-4 py-3 text-right whitespace-nowrap">
                         <a href="<?= h($link) ?>" class="inline-block px-3 py-1.5 rounded-md bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-semibold text-xs">Download</a>
                         <button type="button" data-file="<?= h($f['name']) ?>" class="share px-3 py-1.5 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 font-semibold text-xs">Salin Link</button>
                         <form method="post" class="inline" onsubmit="return confirm('Hapus file ini?')">
                             <input type="hidden" name="action" value="delete">
-                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="csrf" value="<?= h(csrf()) ?>">
                             <input type="hidden" name="f" value="<?= h($f['name']) ?>">
                             <button class="px-3 py-1.5 rounded-md bg-red-50 text-red-600 hover:bg-red-100 font-semibold text-xs">Hapus</button>
                         </form>
@@ -227,8 +194,8 @@ if ($logged) {
                 <tr class="border-t border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-3 font-medium text-slate-800 break-all"><?= h($t['file']) ?><div class="font-mono text-[11px] text-slate-400">…<?= h(substr($t['token'], -8)) ?></div></td>
                     <td class="px-4 py-3 text-slate-500 whitespace-nowrap"><?= date('d M Y H:i', $t['created']) ?></td>
-                    <td class="px-4 py-3 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-xs font-semibold <?= $t['expires'] ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700' ?>"><?= h(human_ttl((int)$t['expires'])) ?></span><?php if ($t['expires']): ?><div class="text-[11px] text-slate-400 mt-0.5">s/d <?= date('d M Y H:i', $t['expires']) ?></div><?php endif; ?></td>
-                    <td class="px-4 py-3 text-right font-mono text-xs"><?= (int)($t['hits'] ?? 0) ?>x</td>
+                    <td class="px-4 py-3 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-xs font-semibold <?= $t['expires'] ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700' ?>"><?= h(ttl_text((int)$t['expires'])) ?></span><?php if ($t['expires']): ?><div class="text-[11px] text-slate-400 mt-0.5">s/d <?= date('d M Y H:i', $t['expires']) ?></div><?php endif; ?></td>
+                    <td class="px-4 py-3 text-right font-mono text-xs"><?= (int)$t['hits'] ?>x</td>
                     <td class="px-4 py-3 text-right whitespace-nowrap">
                         <button type="button" data-copy="<?= h($u) ?>" class="copyraw px-3 py-1.5 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 font-semibold text-xs">Salin URL</button>
                         <?php $c = download_cmds($t['file'], $u); ?>
@@ -236,7 +203,7 @@ if ($logged) {
                         <button type="button" data-copy="<?= h($c['win']) ?>" class="copyraw px-3 py-1.5 rounded-md bg-sky-700 text-white hover:bg-sky-600 font-semibold text-xs" title="Windows PowerShell">curl Win</button>
                         <form method="post" class="inline" onsubmit="return confirm('Cabut link ini? Link langsung tidak bisa dipakai.')">
                             <input type="hidden" name="action" value="revoke">
-                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="csrf" value="<?= h(csrf()) ?>">
                             <input type="hidden" name="t" value="<?= h($t['token']) ?>">
                             <button class="px-3 py-1.5 rounded-md bg-red-50 text-red-600 hover:bg-red-100 font-semibold text-xs">Cabut</button>
                         </form>
@@ -317,7 +284,7 @@ document.getElementById('q')?.addEventListener('input', e => {
     const q = e.target.value.toLowerCase();
     document.querySelectorAll('#rows tr').forEach(tr => tr.style.display = tr.dataset.name.includes(q) ? '' : 'none');
 });
-const CSRF = <?= json_encode(csrf_token()) ?>;
+const CSRF = <?= json_encode(csrf()) ?>;
 function copyText(text, btn) {
     const done = () => { if (!btn) return; const t = btn.innerText; btn.innerText = 'Tersalin ✓'; setTimeout(() => btn.innerText = t, 1200); };
     if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(done, () => fallback());
@@ -359,7 +326,7 @@ createBtn.addEventListener('click', async () => {
     errBox.classList.add('hidden'); createBtn.disabled = true; createBtn.innerText = 'Membuat...';
     try {
         const body = new URLSearchParams({ action: 'token', csrf: CSRF, f: curFile, ttl: String(ttl) });
-        const r = await fetch('/admin/', { method: 'POST', body, credentials: 'same-origin' });
+        const r = await fetch('admin.php', { method: 'POST', body, credentials: 'same-origin' });
         const j = await r.json();
         if (!j.ok) throw new Error(j.error || 'Gagal membuat link.');
         created = true;
