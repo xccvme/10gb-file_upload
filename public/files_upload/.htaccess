@@ -1,0 +1,5 @@
+# Folder upload: tidak bisa diakses langsung (download lewat /download.php)
+Require all denied
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>

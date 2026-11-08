@@ -1,0 +1,9 @@
+# file hasil upload
+public/files_upload/*
+!public/files_upload/index.php
+!public/files_upload/.htaccess
+# runtime
+tmp/
+data/tokens.json
+data/login_attempts.json
+*.log
