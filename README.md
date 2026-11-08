@@ -9,6 +9,31 @@ Halaman admin berisi daftar file, tombol download dan hapus, plus link download 
 
 ---
 
+## Screenshot
+
+**Halaman upload**: pilih banyak file atau drag & drop, lalu progress upload
+
+<p>
+  <img src="screenshots/upload.png" width="49%" alt="Halaman upload">
+  <img src="screenshots/upload-progress.png" width="49%" alt="Progress upload">
+</p>
+
+**Halaman admin**: login, lalu daftar file dan link aktif
+
+<p>
+  <img src="screenshots/login.png" width="49%" alt="Login admin">
+  <img src="screenshots/admin.png" width="49%" alt="Daftar file & link aktif">
+</p>
+
+**Salin Link**: pilih masa aktif, lalu perintah curl / wget / curl Windows siap di-copy
+
+<p>
+  <img src="screenshots/admin-link-1.png" width="49%" alt="Pilih masa aktif link">
+  <img src="screenshots/admin-link-2.png" width="49%" alt="Perintah download siap copy">
+</p>
+
+---
+
 ## Windows (XAMPP)
 
 ```bat
